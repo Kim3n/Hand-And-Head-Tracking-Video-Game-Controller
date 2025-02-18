@@ -74,6 +74,57 @@ class HandTracker:
     def close(self):
         self.landmarker.close()
 
+
+class InputHandler:
+    def __init__(self):
+        self.current_active_keys = set()
+        self.last_active_keys = set()
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self._handle_input, daemon=True)
+        self.thread.start()
+
+    def _handle_input(self):
+        while self.running:
+            with self.lock:
+                current_keys = self.current_active_keys.copy()
+                last_keys = self.last_active_keys.copy()
+
+            # Release keys that are no longer active
+            for key in last_keys - current_keys:
+                if key.startswith('mouse click '):
+                    parts = key.split(' ')
+                    button = parts[2]
+                    pydirectinput.mouseUp(button=button)
+                else:
+                    pydirectinput.keyUp(key)
+
+            # Handle key presses
+            for key in current_keys - last_keys:
+                if key.startswith('mouse click '):
+                    parts = key.split(' ')
+                    button = parts[2]
+                    pydirectinput.mouseDown(button=button)
+                else:
+                    pydirectinput.keyDown(key)
+
+            with self.lock:
+                self.last_active_keys = current_keys.copy()
+
+            time.sleep(0.05)  # Adjust for responsiveness
+
+    def update_keys(self, keys):
+        with self.lock:
+            self.current_active_keys = set(keys)
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+        # Release all keys on exit
+        for key in self.last_active_keys:
+            pydirectinput.keyUp(key)
+
+
 def draw_hands(frame, result):
     if not result.hand_landmarks:
         return frame
@@ -120,42 +171,85 @@ def draw_hands(frame, result):
                     
     return annotated
 
+import numpy as np
+
 def count_fingers(hand_landmarks, handedness):
     finger_status = [0, 0, 0, 0, 0]
 
     thumb_tip = hand_landmarks[4]
-    dip = hand_landmarks[3]
-    pip = hand_landmarks[2]
-    mcp = hand_landmarks[1]
-    index_mcp = hand_landmarks[5]
-    pinky_mcp = hand_landmarks[17]
+    thumb_mcp = hand_landmarks[3]
 
-    if handedness == 'Right':
-        palm_facing_away = pinky_mcp.x < index_mcp.x
-        ref_x = min(dip.x, pip.x, mcp.x)
+    # 1. Choose the three co-planar landmarks (ideally from the palm)
+    points = np.asarray([
+        [hand_landmarks[0].x, hand_landmarks[0].y, hand_landmarks[0].z],
+        [hand_landmarks[5].x, hand_landmarks[5].y, hand_landmarks[5].z],
+        [hand_landmarks[17].x, hand_landmarks[17].y, hand_landmarks[17].z]
+    ])
+
+    # 2. Compute the normal vector (perpendicular to the palm)
+    normal_vector = np.cross(points[2] - points[0], points[1] - points[2])
+    normal_vector /= np.linalg.norm(normal_vector)  # Normalize
+
+    # 3. Determine hand orientation
+    is_vertical = abs(hand_landmarks[5].y - hand_landmarks[17].y) < abs(hand_landmarks[5].x - hand_landmarks[17].x)
+
+    # 4. Check palm direction (towards or away from camera)
+    if handedness == "Left":
+        palm_facing = normal_vector[2] < 0
+    else:  
+        palm_facing = normal_vector[2] > 0
+
+
+    # 5. Finger status logic
+    if is_vertical:
+        # **For horizontal hands, check z-coordinates**
+        for i, fingertip_idx in enumerate([8, 12, 16, 20], start=1):
+            tip_y = hand_landmarks[fingertip_idx].y
+            dip_y = hand_landmarks[fingertip_idx-1].y
+            pip_y = hand_landmarks[fingertip_idx-2].y
+            mcp_y = hand_landmarks[fingertip_idx-3].y
+
+            if tip_y < min(dip_y, pip_y, mcp_y):
+                finger_status[i] = 1
+
+        # Thumb check for horizontal
+        if handedness == 'Right':
+            if (palm_facing and thumb_tip.x > thumb_mcp.x) or \
+               (not palm_facing  and thumb_tip.x < thumb_mcp.x):
+                finger_status[0]= 1
+        else:
+            if (palm_facing and thumb_tip.x < thumb_mcp.x) or \
+               (not palm_facing and thumb_tip.x > thumb_mcp.x):
+                finger_status[0] = 1
+
     else:
-        palm_facing_away = pinky_mcp.x > index_mcp.x
-        ref_x = max(dip.x, pip.x, mcp.x)
+        # **For vertical hands, use x-coordinates (except for the thumb)**
+        # Thumb logic (still using y-coordinates)
+        if handedness == 'Right':
+            if (thumb_tip.y < thumb_mcp.y):
+                finger_status[0] = 1
+            for i, fingertip_idx in enumerate([8, 12, 16, 20], start=1):
+                tip_x = hand_landmarks[fingertip_idx].x
+                pip_x = hand_landmarks[fingertip_idx - 2].x  
 
-    if handedness == 'Right':
-        if (palm_facing_away and thumb_tip.x > ref_x) or \
-           (not palm_facing_away and thumb_tip.x < ref_x):
-            finger_status[0] = 1
-    else:
-        if (palm_facing_away and thumb_tip.x < ref_x) or \
-           (not palm_facing_away and thumb_tip.x > ref_x):
-            finger_status[0] = 1
+                if (palm_facing and tip_x < pip_x) or \
+                (not palm_facing and tip_x > pip_x):
+                    finger_status[i] = 1
+        else:
+            if (thumb_tip.y < thumb_mcp.y):
+                finger_status[0] = 1
+                    # **For fingers, use x-coordinates instead of y**
+            for i, fingertip_idx in enumerate([8, 12, 16, 20], start=1):
+                tip_x = hand_landmarks[fingertip_idx].x
+                pip_x = hand_landmarks[fingertip_idx - 2].x  
 
-    for i, fingertip_idx in enumerate([8, 12, 16, 20], start=1):
-        tip_y = hand_landmarks[fingertip_idx].y
-        dip_y = hand_landmarks[fingertip_idx-1].y
-        pip_y = hand_landmarks[fingertip_idx-2].y
-        mcp_y = hand_landmarks[fingertip_idx-3].y
+                if (palm_facing and tip_x > pip_x) or \
+                (not palm_facing and tip_x < pip_x):
+                    finger_status[i] = 1
 
-        if tip_y < min(dip_y, pip_y, mcp_y):
-            finger_status[i] = 1
 
     return finger_status
+
 
 class HeadTracker:
     def __init__(self):
@@ -245,7 +339,7 @@ class HeadTracker:
 def main():
     hand_tracker = HandTracker()
     head_tracker = HeadTracker()
-    
+    input_handler = InputHandler()
     cap = cv2.VideoCapture(0)
     # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -282,9 +376,13 @@ def main():
             # Draw hand landmarks
             if control_flags["hand"] and hand_tracker.latest_result:
                 display_frame = draw_hands(display_frame, hand_tracker.latest_result)
-
+        current_keys = []
+        left_hand_text = ""
+        right_hand_text = ""
         # Hand tracking status and data
         if control_flags["hand"]:
+             # Key state tracking variables
+
             hand_data = {"Left": None, "Right": None}
             if hand_tracker.latest_result:
                 for idx, hand_landmarks in enumerate(hand_tracker.latest_result.hand_landmarks):
@@ -298,17 +396,19 @@ def main():
         
             if hand_data["Left"]:
                 left_hand_key, left_hand_text = get_left_hand_key(hand_data['Left'])
-                if left_hand_key:
-                    threading.Thread(target=press_keyboard, args=(left_hand_key,)).start()
+                # if left_hand_key:
+                #     threading.Thread(target=press_keyboard, args=(left_hand_key,)).start()
+                if left_hand_key: current_keys.append(left_hand_key)
 
                 
                 
             if hand_data["Right"]:
                 right_hand_key, right_hand_text = get_right_hand_key(hand_data['Right'])
-                if right_hand_key:
-                    threading.Thread(target=press_keyboard, args=(right_hand_key,)).start()
+                # if right_hand_key:
+                #     threading.Thread(target=press_keyboard, args=(right_hand_key,)).start()
+                if right_hand_key: current_keys.append(right_hand_key)
 
-
+            input_handler.update_keys(current_keys)
 
             if control_flags["text"]:
                 if hand_data["Right"]:
@@ -349,7 +449,7 @@ def main():
         cv2.imshow("Controller", display_frame)
         if cv2.waitKey(1) == ord('q'):
             break
-
+    input_handler.stop()        
     hand_tracker.close()
     head_tracker.close()
     cap.release()
@@ -357,6 +457,7 @@ def main():
 
 def press_keyboard(key):
     pydirectinput.press(key)
+
 
 def move_mouse(direction):
     moves = {
