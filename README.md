@@ -31,4 +31,4 @@ By measuring the distance between the nose and these points, the program determi
 
 ## Example Video
 
-<video controls src="media/example.mp4" title="Example video"></video>
+[Example.webm](https://github.com/user-attachments/assets/8d9f9c0b-376d-45f2-aa61-c194336162ba)
